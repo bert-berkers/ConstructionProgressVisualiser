@@ -1,0 +1,1682 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Construction Progress Visualizer - Local</title>
+    <!-- Load Libraries from CDN -->
+    <!-- Using production builds for React/ReactDOM for better performance -->
+    <script src="https://unpkg.com/react@18/umd/react.production.min.js"></script>
+    <script src="https://unpkg.com/react-dom@18/umd/react-dom.production.min.js"></script>
+    <!-- Babel Standalone is required to transpile JSX in the browser -->
+    <script src="https://unpkg.com/@babel/standalone/babel.min.js"></script>
+    <!-- Load Lucide React Icons UMD bundle -->
+    <script src="https://unpkg.com/lucide-react@0.395.0/dist/umd/lucide-react.min.js"></script>
+    <!-- Load Tailwind CSS for styling -->
+    <script src="https://cdn.tailwindcss.com"></script>
+
+    <style>
+        /* Inter font (as used in the original design) */
+        @import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap');
+        html, body, #root {
+            height: 100%;
+            margin: 0;
+            font-family: 'Inter', sans-serif;
+        }
+    </style>
+</head>
+<body>
+    <div id="root"></div>
+
+    <!-- Application Code (Transpiled by Babel) -->
+    <script type="text/babel">
+        // Destructuring React hooks from the global React object
+        const { useState, useRef, useEffect, useCallback } = React;
+        // Accessing Lucide icons from the global object exposed by the UMD bundle (lucideReact)
+        const {
+            Upload, Play, Pause, SkipBack, SkipForward, Calendar, Send, Bot, User,
+            Layers, Info, Eye, EyeOff, Truck, Construction
+        } = lucideReact;
+
+        const EnhancedConstructionVisualizer = () => {
+            const [tasks, setTasks] = useState([]);
+            const [currentDate, setCurrentDate] = useState(new Date());
+            const [dateRange, setDateRange] = useState([]);
+            const [isPlaying, setIsPlaying] = useState(false);
+            const [playbackSpeed, setPlaybackSpeed] = useState(100);
+            const [selectedCell, setSelectedCell] = useState(null);
+            const [error, setError] = useState('');
+            const [isLoading, setIsLoading] = useState(false);
+
+            // Enhanced UI states
+            const [hoveredCell, setHoveredCell] = useState(null);
+            const [viewSettings, setViewSettings] = useState({
+                showGrid: true,
+                showInfrastructure: true,
+                showLabels: true,
+                zoom: 1.0 // Zoom functionality is implemented in drawing/interaction logic
+            });
+
+            // Chat functionality
+            const [chatMessages, setChatMessages] = useState([]);
+            const [chatInput, setChatInput] = useState('');
+            const [isQuerying, setIsQuerying] = useState(false);
+
+            const canvasRef = useRef(null);
+            const fileInputRef = useRef(null);
+            const animationRef = useRef(null);
+            const currentDateIndex = useRef(0);
+            const chatEndRef = useRef(null);
+
+            // Helper function to get ISO week number
+            const getWeekNumber = (date) => {
+                const d = new Date(Date.UTC(date.getFullYear(), date.getMonth(), date.getDate()));
+                const dayNum = d.getUTCDay() || 7;
+                d.setUTCDate(d.getUTCDate() + 4 - dayNum);
+                const yearStart = new Date(Date.UTC(d.getUTCFullYear(),0,1));
+                return Math.ceil((((d - yearStart) / 86400000) + 1)/7);
+            };
+
+            // Format date with week number
+            const formatDateWithWeek = (date) => {
+                // Check if date is valid before formatting
+                if (!date || !(date instanceof Date) || isNaN(date.getTime())) {
+                    return "N/A";
+                }
+                const dateStr = date.toLocaleDateString('en-GB', { day: '2-digit', month: '2-digit', year: 'numeric' });
+                const week = getWeekNumber(date);
+                return `${dateStr} (Week ${week})`;
+            };
+
+            // Add custom styles for enhanced UI (Slider thumbs, animations)
+            useEffect(() => {
+                const style = document.createElement('style');
+                style.textContent = `
+                input[type="range"]::-webkit-slider-thumb {
+                    appearance: none;
+                    width: 20px;
+                    height: 20px;
+                    background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+                    cursor: pointer;
+                    border-radius: 50%;
+                    box-shadow: 0 2px 6px rgba(0,0,0,0.3);
+                    transition: transform 0.2s;
+                }
+                input[type="range"]::-webkit-slider-thumb:hover {
+                    transform: scale(1.2);
+                }
+                input[type="range"]::-moz-range-thumb {
+                    width: 20px;
+                    height: 20px;
+                    background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+                    cursor: pointer;
+                    border-radius: 50%;
+                    box-shadow: 0 2px 6px rgba(0,0,0,0.3);
+                    border: none;
+                    transition: transform 0.2s;
+                }
+                input[type="range"]::-moz-range-thumb:hover {
+                    transform: scale(1.2);
+                }
+                @keyframes slide-in {
+                    from { transform: translateX(100%); opacity: 0; }
+                    to { transform: translateX(0); opacity: 1; }
+                }
+                .slide-in {
+                    animation: slide-in 0.3s ease-out;
+                }
+                `;
+                document.head.appendChild(style);
+                return () => document.head.removeChild(style);
+            }, []);
+
+            // Configuration Constants (These define the grid layout and visual styles)
+            const GRID_CONFIG = {
+                rows: ['HTZ_waterside', 'HTZ_landside', 'AGV_waterside', 'AGV_landside', 'WSTP', 'A', 'B', 'C', 'D', 'LSTP'],
+                cols: Array.from({length: 32}, (_, i) => 69 - i),
+                cellSize: 35,
+                padding: 60
+            };
+
+            const FILL_STATES = {
+                NONE: { name: "No Activity", color: "#FFFFFF", border: "#E5E7EB" },
+                REINFORCEMENT: { name: "Reinforcement Complete", color: "#8B4513", opacity: 1.0 },
+                CONCRETE: { name: "Concrete In Place", color: "#D3D3D3", opacity: 1.0 },
+                CTB: { name: "CTB In Place", color: "#87CEEB", opacity: 1.0 },
+                CONCRETE_PAVEMENT: { name: "Concrete Pavement", color: "#808080", opacity: 1.0 },
+                ASPHALT: { name: "Asphalt In Place", color: "#4A4A4A", opacity: 1.0 },
+                SHORE_POWER: { name: "Shore Power", color: "#FFFF00", opacity: 1.0, temporary: true, pulse: true },
+                MV_CABLE: { name: "MV Cable", color: "#FFD700", opacity: 1.0, temporary: true, pulse: true },
+                REEFER: { name: "Refrigerated Storage", color: "#B0E0E6", opacity: 1.0 }
+            };
+
+            const INFRASTRUCTURE_STYLES = {
+                concealed_gutter: { color: "#6495ED", width: 10, name: "Concealed Gutter", temporary: false },
+                fire_pipeline: { color: "#00008B", width: 10, name: "Fire Pipeline", temporary: true },
+                armg_rail: { color: "#FF4500", width: 10, name: "ARMG Rail", temporary: false },
+                sqc_rail: { color: "#FF8C00", width: 10, name: "SQC Rail", temporary: false },
+                service_road_infra: {
+                    color: "#00CED1",
+                    width: 10,
+                    name: "Service Road",
+                    temporary: true,
+                    states: {
+                        planned: { dash: [5, 5], opacity: 0.5, color: "#9CA3AF" },
+                        active: { dash: [10, 3], opacity: 1, color: "#F59E0B", glow: true },
+                        complete: { dash: [], opacity: 1, color: "#059669" }
+                    }
+                },
+                formwork: { color: "#FF0000", width: 4, name: "Formwork", temporary: true, isOutline: true }
+            };
+
+            const APMT_LEGEND_MAPPING = {
+                "01": "reinforcement", "02": "formwork", "03": "concrete_pour", "04": "asphalt",
+                "05": "concealed_gutter", "06": "fire_pipeline", "07": "armg_rail", "08": "sqc_rail",
+                "09": "service_road_infra", "10": "ctb", "11": "concrete_pavement",
+                "12": "shore_power", "13": "mv_cable", "14": "underground_infra",
+                "15": "crane_assembly", "16": "reefer", "18": "lstp_objects"
+            };
+
+            const ROW_NUMBER_TO_NAME = {
+                1: 'HTZ_waterside', 2: 'HTZ_landside', 3: 'AGV_waterside', 4: 'AGV_landside',
+                5: 'WSTP', 6: 'A', 7: 'B', 8: 'C', 9: 'D', 10: 'LSTP'
+            };
+
+            // --- XML Parsing Logic ---
+
+            // Parse coordinate string into structured locations
+            const parseCoordinate = (coordStr, activityType) => {
+                if (!coordStr) return [];
+
+                const locations = [];
+                const groups = coordStr.split(';');
+
+                for (let group of groups) {
+                    group = group.trim();
+
+                    if (group.includes('|')) {
+                        // Vertical line format: Col1|Col2, RowStart-RowEnd
+                        const match = group.match(/(\d+)\|(\d+),\s*(\d+)(?:-(\d+))?/);
+                        if (match) {
+                            const [, col1, col2, rowStart, rowEnd] = match;
+                            locations.push({
+                                type: 'vertical_line',
+                                col1: parseInt(col1),
+                                col2: parseInt(col2),
+                                rowStart: parseInt(rowStart),
+                                rowEnd: rowEnd ? parseInt(rowEnd) : parseInt(rowStart)
+                            });
+                        }
+                    } else {
+                        // Standard format: ColStart-ColEnd, RowStart-RowEnd
+                        const isHorizontalInfra = ['concealed_gutter', 'fire_pipeline', 'sqc_rail', 'service_road_infra'].includes(activityType);
+
+                        const match = group.match(/(\d+)(?:-(\d+))?,\s*(\d+)(?:-(\d+))?/);
+                        if (match) {
+                            const [, colStart, colEnd, rowStart, rowEnd] = match;
+                            const cs = parseInt(colStart);
+                            const ce = colEnd ? parseInt(colEnd) : cs;
+                            const rs = parseInt(rowStart);
+                            const re = rowEnd ? parseInt(rowEnd) : rs;
+
+                            if (activityType === 'armg_rail' && rs !== re && cs === ce) {
+                                // ARMG rail specific visualization when defined using cell notation
+                                locations.push({
+                                    type: 'vertical_line',
+                                    col1: cs,
+                                    col2: cs,
+                                    rowStart: rs,
+                                    rowEnd: re
+                                });
+                            } else if (isHorizontalInfra) {
+                                // Horizontal infrastructure visualization
+                                locations.push({
+                                    type: 'horizontal_line',
+                                    colStart: cs,
+                                    colEnd: ce,
+                                    rowStart: rs,
+                                    rowEnd: re
+                                });
+                            } else {
+                                // Standard cell fill
+                                for (let col = cs; col <= ce; col++) {
+                                    for (let row = rs; row <= re; row++) {
+                                        if (ROW_NUMBER_TO_NAME[row]) {
+                                            locations.push({
+                                                type: 'cell',
+                                                col: col,
+                                                row: ROW_NUMBER_TO_NAME[row]
+                                            });
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+
+                return locations;
+            };
+
+            // Parse the entire XML content
+            const parseXML = useCallback((xmlContent) => {
+                try {
+                    const parser = new DOMParser();
+                    const xmlDoc = parser.parseFromString(xmlContent, "text/xml");
+
+                    if (xmlDoc.getElementsByTagName("parsererror").length > 0) {
+                        throw new Error("Invalid XML format");
+                    }
+
+                    const activities = xmlDoc.getElementsByTagName("Activity");
+                    const activityCodes = xmlDoc.getElementsByTagName("ActivityCode");
+                    const relationships = xmlDoc.getElementsByTagName("Relationship");
+
+                    // Build activity code lookup
+                    const codeMap = {};
+                    for (let code of activityCodes) {
+                        const objectId = code.getElementsByTagName("ObjectId")[0]?.textContent;
+                        const codeValue = code.getElementsByTagName("CodeValue")[0]?.textContent;
+                        if (objectId && codeValue) {
+                            codeMap[objectId] = codeValue;
+                        }
+                    }
+
+                    // Build relationships map
+                    const predecessorMap = {};
+                    const successorMap = {};
+
+                    for (let rel of relationships) {
+                        const predId = rel.getElementsByTagName("PredecessorActivityId")[0]?.textContent;
+                        const succId = rel.getElementsByTagName("SuccessorActivityId")[0]?.textContent;
+                        const type = rel.getElementsByTagName("Type")[0]?.textContent;
+                        const lag = rel.getElementsByTagName("Lag")[0]?.textContent || "0";
+
+                        if (predId && succId) {
+                            if (!predecessorMap[succId]) predecessorMap[succId] = [];
+                            if (!successorMap[predId]) successorMap[predId] = [];
+
+                            predecessorMap[succId].push({ id: predId, type, lag });
+                            successorMap[predId].push({ id: succId, type, lag });
+                        }
+                    }
+
+                    const parsedTasks = [];
+                    const taskIdMap = {};
+
+                    for (let activity of activities) {
+                        const name = activity.getElementsByTagName("Name")[0]?.textContent;
+                        const startDate = activity.getElementsByTagName("StartDate")[0]?.textContent;
+                        const finishDate = activity.getElementsByTagName("FinishDate")[0]?.textContent;
+                        const activityId = activity.getElementsByTagName("Id")[0]?.textContent;
+
+                        // Try to get planned duration
+                        let plannedDuration = activity.getElementsByTagName("PlannedDuration")[0]?.textContent ||
+                                                activity.getElementsByTagName("RemainingDuration")[0]?.textContent ||
+                                                null;
+
+                        if (!name || !startDate || !finishDate) continue;
+
+                        // Get activity code (APMT specific logic based on user input)
+                        const codes = activity.getElementsByTagName("Code");
+                        let apmt_code = null;
+                        for (let code of codes) {
+                            const typeId = code.getElementsByTagName("TypeObjectId")[0]?.textContent;
+                            // Assuming '920001' is the relevant TypeObjectId based on user code
+                            if (typeId === '920001') {
+                                const valueId = code.getElementsByTagName("ValueObjectId")[0]?.textContent;
+                                if (valueId && codeMap[valueId]) {
+                                    apmt_code = codeMap[valueId];
+                                }
+                            }
+                        }
+
+                        // Get coordinate and working days from UDFs
+                        const udfs = activity.getElementsByTagName("UDF");
+                        let coordinate = null;
+                        let workingDays = null;
+
+                        for (let udf of udfs) {
+                            const typeId = udf.getElementsByTagName("TypeObjectId")[0]?.textContent;
+                            const title = udf.getElementsByTagName("Title")[0]?.textContent;
+
+                            // Assuming '1823601' is the TypeObjectId for coordinates based on user code
+                            if (typeId === '1823601') {
+                                coordinate = udf.getElementsByTagName("TextValue")[0]?.textContent;
+                            }
+
+                            // Check for working days based on title keywords
+                            if (title && (title.toLowerCase().includes('doorlooptijd') ||
+                                            title.toLowerCase().includes('working days'))) {
+                                const doubleValue = udf.getElementsByTagName("DoubleValue")[0]?.textContent;
+                                const intValue = udf.getElementsByTagName("IntegerValue")[0]?.textContent;
+                                workingDays = doubleValue || intValue || null;
+                            }
+                        }
+
+                        if (workingDays) {
+                            plannedDuration = workingDays;
+                        }
+
+                        if (apmt_code && coordinate && APMT_LEGEND_MAPPING[apmt_code]) {
+                            const task = {
+                                id: activityId,
+                                name,
+                                // Parse dates, handling potential milliseconds format by splitting at '.'
+                                start_date: new Date(startDate.split('.')[0]),
+                                end_date: new Date(finishDate.split('.')[0]),
+                                planned_duration: plannedDuration ? parseFloat(plannedDuration) : null,
+                                activity_type: APMT_LEGEND_MAPPING[apmt_code],
+                                coordinate,
+                                locations: parseCoordinate(coordinate, APMT_LEGEND_MAPPING[apmt_code]),
+                                predecessors: predecessorMap[activityId] || [],
+                                successors: successorMap[activityId] || []
+                            };
+
+                            if (task.locations.length > 0) {
+                                parsedTasks.push(task);
+                                taskIdMap[activityId] = task;
+                            }
+                        }
+                    }
+
+                    // Resolve predecessor/successor names
+                    parsedTasks.forEach(task => {
+                        task.predecessors = task.predecessors.map(pred => ({
+                            ...pred,
+                            name: taskIdMap[pred.id]?.name || 'Unknown'
+                        }));
+                        task.successors = task.successors.map(succ => ({
+                            ...succ,
+                            name: taskIdMap[succ.id]?.name || 'Unknown'
+                        }));
+                    });
+
+                    return parsedTasks;
+                } catch (error) {
+                    console.error('XML parsing error:', error);
+                    throw new Error(`Failed to parse XML: ${error.message}. Please ensure the file is a valid Primavera XML export with the required Activity Codes and UDFs.`);
+                }
+            }, []);
+
+            // --- Visualization Logic ---
+
+            // Calculate the state of the grid for a specific date
+            // This extensive function determines what fills, lines, and overlays should be visible.
+            const calculateStates = useCallback((tasks, targetDate) => {
+                const states = {};
+                const verticalLines = [];
+                const horizontalLines = [];
+                const formworkCells = [];
+
+                // Initialize grid
+                for (let row of GRID_CONFIG.rows) {
+                    for (let col of GRID_CONFIG.cols) {
+                        states[`${row}-${col}`] = {
+                            fillState: 'NONE',
+                            tasks: [],
+                            infrastructure: [],
+                            sqcOverlay: false,
+                            armgOverlay: false,
+                            craneOverlay: false,
+                            lstpObjects: false
+                        };
+                    }
+                }
+
+                // Process tasks chronologically
+                const sortedTasks = [...tasks].sort((a, b) => a.start_date - b.start_date);
+
+                for (let task of sortedTasks) {
+                    const isActive = task.start_date <= targetDate && targetDate <= task.end_date;
+                    const isStarted = task.start_date <= targetDate;
+                    const isCompleted = targetDate > task.end_date;
+
+                    const style = INFRASTRUCTURE_STYLES[task.activity_type];
+
+                    // Track infrastructure passing through cells (for info display when clicked)
+                    if (style && ['concealed_gutter', 'fire_pipeline', 'sqc_rail', 'service_road_infra'].includes(task.activity_type)) {
+                        for (let location of task.locations) {
+                            if (location.type === 'horizontal_line') {
+                                const shouldShow = style.temporary ? isActive : isStarted;
+                                if (shouldShow) {
+                                    const cs = Math.min(location.colStart, location.colEnd);
+                                    const ce = Math.max(location.colStart, location.colEnd);
+
+                                    for (let col = cs; col <= ce; col++) {
+                                        for (let r = location.rowStart; r <= location.rowEnd; r++) {
+                                            if (ROW_NUMBER_TO_NAME[r]) {
+                                                const key = `${ROW_NUMBER_TO_NAME[r]}-${col}`;
+                                                if (states[key]) {
+                                                    states[key].infrastructure.push({
+                                                        type: task.activity_type,
+                                                        name: task.name,
+                                                        status: isActive ? 'active' : 'complete'
+                                                    });
+                                                }
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+
+                    // Handle Formwork (Specific visualization: outline)
+                    if (task.activity_type === 'formwork' && isActive) {
+                        for (let location of task.locations) {
+                            if (location.type === 'cell') {
+                                formworkCells.push({
+                                    col: location.col,
+                                    row: location.row,
+                                    taskName: task.name
+                                });
+                                const key = `${location.row}-${location.col}`;
+                                if (states[key]) {
+                                    states[key].infrastructure.push({
+                                        type: 'formwork',
+                                        name: task.name,
+                                        status: 'active'
+                                    });
+                                }
+                            }
+                        }
+                        continue;
+                    }
+
+                    // Handle ARMG Rail (Specific visualization: vertical line and overlay)
+                    if (task.activity_type === 'armg_rail') {
+                        for (let location of task.locations) {
+                            if (location.type === 'vertical_line') {
+                                if (isStarted) {
+                                    verticalLines.push({
+                                        ...location,
+                                        activityType: task.activity_type,
+                                        status: isActive ? 'active' : isCompleted ? 'complete' : 'planned',
+                                        taskName: task.name,
+                                        isPermanent: true
+                                    });
+
+                                    // Track through cells and apply overlay
+                                    for (let row = location.rowStart; row <= location.rowEnd; row++) {
+                                        if (ROW_NUMBER_TO_NAME[row]) {
+                                            const minCol = Math.min(location.col1, location.col2);
+                                            const maxCol = Math.max(location.col1, location.col2);
+                                            for (let col = minCol; col <= maxCol; col++) {
+                                                const key = `${ROW_NUMBER_TO_NAME[row]}-${col}`;
+                                                if (states[key]) {
+                                                    states[key].infrastructure.push({
+                                                        type: 'armg_rail',
+                                                        name: task.name,
+                                                        status: isActive ? 'active' : 'complete'
+                                                    });
+                                                    if (isActive) {
+                                                        states[key].armgOverlay = true;
+                                                        states[key].tasks.push({
+                                                            name: task.name + ' (Working Area)',
+                                                            type: task.activity_type,
+                                                            status: 'active',
+                                                            start: task.start_date,
+                                                            end: task.end_date,
+                                                            planned_duration: task.planned_duration,
+                                                            predecessors: task.predecessors,
+                                                            successors: task.successors
+                                                        });
+                                                    }
+                                                }
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                        continue;
+                    }
+
+                    // Handle SQC Rail (Specific visualization: horizontal line and overlay)
+                    if (task.activity_type === 'sqc_rail') {
+                        for (let location of task.locations) {
+                            if (location.type === 'horizontal_line') {
+                                if (isStarted) {
+                                    // Split visualization if spanning rows 1 and 2
+                                    if (location.rowStart === 1 && location.rowEnd === 2) {
+                                        horizontalLines.push({
+                                            ...location,
+                                            rowStart: 1,
+                                            rowEnd: 1,
+                                            activityType: task.activity_type,
+                                            status: isActive ? 'active' : isCompleted ? 'complete' : 'planned',
+                                            taskName: task.name + ' (Waterside Rail)',
+                                            isPermanent: true
+                                        });
+
+                                        horizontalLines.push({
+                                            ...location,
+                                            rowStart: 2,
+                                            rowEnd: 2,
+                                            activityType: task.activity_type,
+                                            status: isActive ? 'active' : isCompleted ? 'complete' : 'planned',
+                                            taskName: task.name + ' (Landside Rail)',
+                                            isPermanent: true
+                                        });
+                                    } else {
+                                        horizontalLines.push({
+                                            ...location,
+                                            activityType: task.activity_type,
+                                            status: isActive ? 'active' : isCompleted ? 'complete' : 'planned',
+                                            taskName: task.name,
+                                            isPermanent: true
+                                        });
+                                    }
+                                }
+
+                                // Apply overlay if active
+                                if (isActive) {
+                                    const cs = Math.min(location.colStart, location.colEnd);
+                                    const ce = Math.max(location.colStart, location.colEnd);
+
+                                    for (let col = cs; col <= ce; col++) {
+                                        for (let r = location.rowStart; r <= location.rowEnd; r++) {
+                                            if (ROW_NUMBER_TO_NAME[r]) {
+                                                const key = `${ROW_NUMBER_TO_NAME[r]}-${col}`;
+                                                if (states[key]) {
+                                                    states[key].sqcOverlay = true;
+                                                    states[key].tasks.push({
+                                                        name: task.name + ' (Working Area)',
+                                                        type: task.activity_type,
+                                                        status: 'active',
+                                                        start: task.start_date,
+                                                        end: task.end_date,
+                                                        planned_duration: task.planned_duration,
+                                                        predecessors: task.predecessors,
+                                                        successors: task.successors
+                                                    });
+                                                }
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                        continue;
+                    }
+
+                    // Process other infrastructure lines
+                    if (style && task.activity_type !== 'formwork' && task.activity_type !== 'sqc_rail') {
+                        for (let location of task.locations) {
+                            let shouldShowInfra = style.temporary ? isActive : isStarted;
+
+                            if (location.type === 'vertical_line' && shouldShowInfra) {
+                                verticalLines.push({
+                                    ...location,
+                                    activityType: task.activity_type,
+                                    status: isActive ? 'active' : isCompleted ? 'complete' : 'planned',
+                                    taskName: task.name,
+                                    isPermanent: !style.temporary
+                                });
+                            } else if (location.type === 'horizontal_line' && shouldShowInfra) {
+                                horizontalLines.push({
+                                    ...location,
+                                    activityType: task.activity_type,
+                                    status: isActive ? 'active' : isCompleted ? 'complete' : 'planned',
+                                    taskName: task.name,
+                                    isPermanent: !style.temporary
+                                });
+                            }
+                        }
+                    }
+
+                    // Handle regular cell activities (Fills)
+                    for (let location of task.locations) {
+                        if (location.type === 'cell') {
+                            const key = `${location.row}-${location.col}`;
+                            if (!states[key]) continue;
+
+                            const cellState = states[key];
+
+                            // Add task to cell's task list
+                            if (isActive || isCompleted) {
+                                cellState.tasks.push({
+                                    name: task.name,
+                                    type: task.activity_type,
+                                    status: isActive ? 'active' : 'completed',
+                                    start: task.start_date,
+                                    end: task.end_date,
+                                    planned_duration: task.planned_duration,
+                                    predecessors: task.predecessors,
+                                    successors: task.successors
+                                });
+                            }
+
+                            // Update fill state based on chronological order and status
+                            if (task.activity_type === 'reinforcement' && isStarted) {
+                                cellState.fillState = 'REINFORCEMENT';
+                            } else if (task.activity_type === 'concrete_pour' && isCompleted) {
+                                cellState.fillState = 'CONCRETE';
+                            } else if (task.activity_type === 'ctb' && isCompleted) {
+                                cellState.fillState = 'CTB';
+                            } else if (task.activity_type === 'concrete_pavement' && isCompleted) {
+                                cellState.fillState = 'CONCRETE_PAVEMENT';
+                            } else if (task.activity_type === 'asphalt' && isCompleted) {
+                                cellState.fillState = 'ASPHALT';
+                            } else if (task.activity_type === 'reefer' && isCompleted) {
+                                cellState.fillState = 'REEFER';
+                            } else if (task.activity_type === 'crane_assembly' && isActive) {
+                                cellState.craneOverlay = true;
+                            } else if (task.activity_type === 'shore_power' && isActive) {
+                                cellState.fillState = 'SHORE_POWER';
+                            } else if (task.activity_type === 'mv_cable' && isActive) {
+                                cellState.fillState = 'MV_CABLE';
+                            }
+
+                            if (task.activity_type === 'lstp_objects' && (isActive || isCompleted)) {
+                                cellState.lstpObjects = true;
+                            }
+                        }
+                    }
+                }
+
+                return { cellStates: states, verticalLines, horizontalLines, formworkCells };
+            }, []);
+
+            // Draw visualization on the canvas
+            const drawVisualization = useCallback((states, targetDate) => {
+                const canvas = canvasRef.current;
+                if (!canvas) return;
+
+                const ctx = canvas.getContext('2d');
+                const { cellSize, padding } = GRID_CONFIG;
+                const zoom = viewSettings.zoom;
+
+                // Set canvas dimensions
+                canvas.width = ((GRID_CONFIG.cols.length * cellSize) + (padding * 2)) * zoom;
+                // Height includes extra 40px for top labels and spacing
+                canvas.height = ((GRID_CONFIG.rows.length * cellSize) + (padding * 2) + 40) * zoom;
+
+                ctx.clearRect(0, 0, canvas.width, canvas.height);
+                ctx.scale(zoom, zoom);
+
+                // Background
+                const gradient = ctx.createLinearGradient(0, 0, canvas.width / zoom, canvas.height / zoom);
+                gradient.addColorStop(0, '#F9FAFB');
+                gradient.addColorStop(1, '#F3F4F6');
+                ctx.fillStyle = gradient;
+                ctx.fillRect(0, 0, canvas.width / zoom, canvas.height / zoom);
+
+                // Draw grid cells
+                GRID_CONFIG.rows.forEach((row, rowIdx) => {
+                    GRID_CONFIG.cols.forEach((col, colIdx) => {
+                        // Calculate position (Y offset by 20px for top area)
+                        const x = padding + (colIdx * cellSize);
+                        const y = padding + (rowIdx * cellSize) + 20;
+                        const key = `${row}-${col}`;
+                        const cellState = states.cellStates[key] || { fillState: 'NONE' };
+
+                        const fillData = FILL_STATES[cellState.fillState] || FILL_STATES.NONE;
+
+                        ctx.save();
+
+                        // Draw cell fill
+                        if (fillData.pulse && cellState.fillState !== 'NONE') {
+                            const cellGradient = ctx.createRadialGradient(
+                                x + cellSize/2, y + cellSize/2, 0,
+                                x + cellSize/2, y + cellSize/2, cellSize/2
+                            );
+                            cellGradient.addColorStop(0, fillData.color);
+                            cellGradient.addColorStop(1, fillData.color + '99'); // Add alpha for gradient edge
+                            ctx.fillStyle = cellGradient;
+                        } else {
+                            ctx.fillStyle = fillData.color;
+                        }
+
+                        if (fillData.opacity && fillData.opacity < 1) {
+                            ctx.globalAlpha = fillData.opacity;
+                        }
+
+                        ctx.fillRect(x, y, cellSize, cellSize);
+                        ctx.globalAlpha = 1;
+
+                        // Draw overlays (SQC, ARMG, Crane)
+                        if (cellState.sqcOverlay) {
+                            ctx.save();
+                            ctx.fillStyle = '#FF8C00';
+                            ctx.globalAlpha = 0.5;
+                            ctx.fillRect(x, y, cellSize, cellSize);
+                            ctx.restore();
+                        }
+
+                        if (cellState.armgOverlay) {
+                            ctx.save();
+                            ctx.fillStyle = '#FF4500';
+                            ctx.globalAlpha = 0.5;
+                            ctx.fillRect(x, y, cellSize, cellSize);
+                            ctx.restore();
+                        }
+
+                        if (cellState.craneOverlay) {
+                            ctx.save();
+                            ctx.fillStyle = '#90EE90';
+                            ctx.globalAlpha = 0.5;
+                            ctx.fillRect(x, y, cellSize, cellSize);
+                            ctx.restore();
+                        }
+
+                        // Draw LSTP objects (Red circle)
+                        if (cellState.lstpObjects) {
+                            ctx.save();
+                            ctx.strokeStyle = '#FF0000';
+                            ctx.fillStyle = '#FF0000';
+                            ctx.lineWidth = 2;
+                            ctx.globalAlpha = 0.8;
+
+                            const centerX = x + cellSize / 2;
+                            const centerY = y + cellSize / 2;
+                            const radius = cellSize / 4;
+
+                            ctx.beginPath();
+                            ctx.arc(centerX, centerY, radius, 0, 2 * Math.PI);
+                            ctx.fill();
+                            ctx.stroke();
+                            ctx.restore();
+                        }
+
+                        // Draw border
+                        ctx.globalAlpha = 1;
+                        // Always draw border if hovered, otherwise respect showGrid setting
+                        if (viewSettings.showGrid || (hoveredCell && hoveredCell.col === col && hoveredCell.row === row)) {
+                             if (hoveredCell && hoveredCell.col === col && hoveredCell.row === row) {
+                                // Highlight hovered cell
+                                ctx.strokeStyle = '#7C3AED';
+                                ctx.lineWidth = 2;
+                                ctx.shadowColor = '#7C3AED';
+                                ctx.shadowBlur = 5;
+                            } else {
+                                // Default border
+                                ctx.strokeStyle = fillData.border || '#E5E7EB';
+                                ctx.lineWidth = 0.5;
+                            }
+                            ctx.strokeRect(x, y, cellSize, cellSize);
+                        }
+
+
+                        // Pulse effect for specific states (animated border)
+                        if (fillData.pulse && cellState.fillState !== 'NONE') {
+                            ctx.strokeStyle = fillData.color;
+                            ctx.lineWidth = 2;
+                            // Simple time-based pulse animation
+                            ctx.globalAlpha = 0.5 * Math.sin(Date.now() / 500) + 0.5;
+                            ctx.strokeRect(x + 2, y + 2, cellSize - 4, cellSize - 4);
+                        }
+
+                        ctx.restore();
+                    });
+                });
+
+                // Draw infrastructure lines
+                if (viewSettings.showInfrastructure) {
+                    // Draw horizontal lines
+                    states.horizontalLines.forEach(line => {
+                        const style = INFRASTRUCTURE_STYLES[line.activityType];
+                        if (!style) return;
+
+                        ctx.save();
+
+                        const colStartIdx = GRID_CONFIG.cols.indexOf(line.colStart);
+                        const colEndIdx = GRID_CONFIG.cols.indexOf(line.colEnd);
+
+                        if (colStartIdx === -1 || colEndIdx === -1) return;
+
+                        let x1, x2;
+                        // Determine X coordinates (Columns are numbered decreasingly)
+                        if (line.colStart < line.colEnd) {
+                            x1 = padding + (colEndIdx * cellSize);
+                            x2 = padding + ((colStartIdx + 1) * cellSize);
+                        } else {
+                            x1 = padding + (colStartIdx * cellSize);
+                            x2 = padding + ((colEndIdx + 1) * cellSize);
+                        }
+
+                        let y;
+
+                        // Determine Y coordinates based on specific row logic (as defined in original code)
+                        if (line.rowStart === 1 && line.rowEnd === 1) {
+                            const rowIdx = GRID_CONFIG.rows.indexOf('HTZ_waterside');
+                            y = padding + (rowIdx * cellSize) + 20; // Top edge
+                        } else if (line.rowStart === 2 && line.rowEnd === 2) {
+                            const rowIdx = GRID_CONFIG.rows.indexOf('HTZ_landside');
+                            y = padding + ((rowIdx + 1) * cellSize) + 20; // Bottom edge
+                        } else if (line.rowStart === 1 && line.rowEnd === 2) {
+                            const row1Idx = GRID_CONFIG.rows.indexOf('HTZ_waterside');
+                            y = padding + ((row1Idx + 1) * cellSize) + 20; // Between 1 and 2
+                        } else if (line.rowStart === 3 && line.rowEnd === 3) {
+                            const rowIdx = GRID_CONFIG.rows.indexOf('AGV_waterside');
+                            // Specific positioning within row 3
+                            if (line.activityType === 'concealed_gutter') {
+                                y = padding + (rowIdx * cellSize) + 20 + (cellSize * 0.35);
+                            } else if (line.activityType === 'fire_pipeline') {
+                                y = padding + (rowIdx * cellSize) + 20 + (cellSize * 0.45);
+                            } else {
+                                y = padding + (rowIdx * cellSize) + 20;
+                            }
+                        } else if (line.rowStart === 4 && line.rowEnd === 4) {
+                            const rowIdx = GRID_CONFIG.rows.indexOf('AGV_landside');
+                            y = padding + ((rowIdx + 1) * cellSize) + 20; // Bottom edge
+                        } else if (line.rowStart === 3 && line.rowEnd === 4) {
+                            const row3Idx = GRID_CONFIG.rows.indexOf('AGV_waterside');
+                             // Specific positioning between 3 and 4
+                            if (line.activityType === 'concealed_gutter') {
+                                y = padding + ((row3Idx + 1) * cellSize) + 20 + 5;
+                            } else if (line.activityType === 'fire_pipeline') {
+                                y = padding + ((row3Idx + 1) * cellSize) + 20 - 5;
+                            } else {
+                                y = padding + ((row3Idx + 1) * cellSize) + 20;
+                            }
+                        } else {
+                            // General centering
+                            const rowStartIdx = GRID_CONFIG.rows.indexOf(ROW_NUMBER_TO_NAME[line.rowStart]);
+                            const rowEndIdx = GRID_CONFIG.rows.indexOf(ROW_NUMBER_TO_NAME[line.rowEnd]);
+                            if (rowStartIdx !== -1 && rowEndIdx !== -1) {
+                                y = padding + ((rowStartIdx + rowEndIdx + 1) / 2 * cellSize) + 20;
+                            }
+                        }
+
+                        if (y) {
+                            // Apply styles (including specific states for service road)
+                            if (line.activityType === 'service_road_infra' && style.states) {
+                                const roadState = style.states[line.status] || style.states.planned;
+                                ctx.strokeStyle = roadState.color || style.color;
+                                ctx.lineWidth = style.width;
+                                ctx.globalAlpha = roadState.opacity;
+
+                                if (roadState.dash && roadState.dash.length > 0) {
+                                    ctx.setLineDash(roadState.dash);
+                                }
+
+                                if (roadState.glow && line.status === 'active') {
+                                    ctx.shadowColor = roadState.color;
+                                    ctx.shadowBlur = 10;
+                                }
+                            } else {
+                                // Standard styles
+                                ctx.strokeStyle = style.color;
+                                ctx.lineWidth = style.width;
+
+                                if (style.temporary) {
+                                    ctx.globalAlpha = 0.8;
+                                }
+                            }
+
+                            ctx.beginPath();
+                            ctx.moveTo(x1, y);
+                            ctx.lineTo(x2, y);
+                            ctx.stroke();
+
+                            ctx.setLineDash([]);
+                            ctx.shadowBlur = 0;
+                        }
+
+                        ctx.restore();
+                    });
+
+                    // Draw vertical lines (e.g., ARMG Rails)
+                    states.verticalLines.forEach(line => {
+                        const style = INFRASTRUCTURE_STYLES[line.activityType];
+                        if (!style) return;
+
+                        ctx.save();
+
+                        const col1Idx = GRID_CONFIG.cols.indexOf(line.col1);
+                        const col2Idx = GRID_CONFIG.cols.indexOf(line.col2);
+
+                        if (col1Idx !== -1 && col2Idx !== -1) {
+                            // Position at the right edge of the leftmost column involved
+                            const leftCol = Math.max(line.col1, line.col2); // Higher number is further left in this grid
+                            const leftIdx = GRID_CONFIG.cols.indexOf(leftCol);
+
+                            const x = padding + ((leftIdx + 1) * cellSize);
+
+                            // Determine Y coordinates
+                            const rowStartIdx = line.rowStart - 1; // Rows are 1-indexed in data, 0-indexed in GRID_CONFIG.rows
+                            const rowEndIdx = line.rowEnd - 1;
+
+                            if (rowStartIdx >= 0 && rowEndIdx < GRID_CONFIG.rows.length) {
+                                const y1 = padding + (rowStartIdx * cellSize) + 20;
+                                const y2 = padding + ((rowEndIdx + 1) * cellSize) + 20;
+
+                                ctx.strokeStyle = style.color;
+                                ctx.lineWidth = style.width;
+
+                                if (style.temporary) {
+                                    ctx.globalAlpha = 0.8;
+                                }
+
+                                ctx.beginPath();
+                                ctx.moveTo(x, y1);
+                                ctx.lineTo(x, y2);
+                                ctx.stroke();
+                            }
+                        }
+
+                        ctx.restore();
+                    });
+                }
+
+                // Draw formwork outlines (Dashed red border)
+                if (states.formworkCells && states.formworkCells.length > 0) {
+                    states.formworkCells.forEach(formwork => {
+                        const colIdx = GRID_CONFIG.cols.indexOf(formwork.col);
+                        const rowIdx = GRID_CONFIG.rows.indexOf(formwork.row);
+
+                        if (colIdx !== -1 && rowIdx !== -1) {
+                            const x = padding + (colIdx * cellSize);
+                            const y = padding + (rowIdx * cellSize) + 20;
+
+                            ctx.save();
+
+                            // White background stroke for visibility against dark fills
+                            ctx.strokeStyle = '#FFFFFF';
+                            ctx.lineWidth = 6;
+                            ctx.strokeRect(x + 1, y + 1, cellSize - 2, cellSize - 2);
+
+                            // Dashed red outline
+                            ctx.strokeStyle = '#FF0000';
+                            ctx.lineWidth = 4;
+                            ctx.setLineDash([5, 3]);
+
+                            ctx.strokeRect(x + 2, y + 2, cellSize - 4, cellSize - 4);
+
+                            ctx.setLineDash([]);
+                            ctx.restore();
+                        }
+                    });
+                }
+
+                // Draw labels (Row and Column Headers)
+                if (viewSettings.showLabels) {
+                    ctx.fillStyle = '#374151';
+                    ctx.font = 'bold 12px Inter, Arial';
+                    ctx.textAlign = 'center';
+
+                    // Column labels (top)
+                    GRID_CONFIG.cols.forEach((col, colIdx) => {
+                        const x = padding + (colIdx * cellSize) + (cellSize / 2);
+                        ctx.fillText(col.toString(), x, padding + 10);
+                    });
+
+                    // Row labels (left)
+                    ctx.textAlign = 'right';
+                    GRID_CONFIG.rows.forEach((row, rowIdx) => {
+                        const y = padding + (rowIdx * cellSize) + (cellSize / 2) + 20;
+                        const rowNumber = rowIdx + 1; // Display 1-indexed row numbers
+                        ctx.fillText(rowNumber.toString(), padding - 5, y);
+                    });
+                }
+
+                // Draw current date (top left)
+                ctx.textAlign = 'left';
+                ctx.font = 'bold 16px Inter, Arial';
+                ctx.fillStyle = '#1F2937';
+                ctx.fillText(`Date: ${formatDateWithWeek(targetDate)}`, padding, 15);
+
+            }, [hoveredCell, viewSettings]);
+
+            // --- Chat Functionality (Adapted for Local Use) ---
+
+             // Local analysis function (replaces external API call)
+            const querySchedule = async (question) => {
+                if (!tasks.length) return "No schedule loaded. Please upload a Primavera XML file first.";
+
+                // Basic local analysis implementation
+                const lowerQuestion = question.toLowerCase();
+                let response = "🔍 Local Analysis (Offline Mode):\n\n";
+
+                const activeTasks = tasks.filter(t => t.start_date <= currentDate && currentDate <= t.end_date);
+                const completedTasks = tasks.filter(t => currentDate > t.end_date);
+                const plannedTasks = tasks.filter(t => t.start_date > currentDate);
+
+                if (lowerQuestion.includes("summary") || lowerQuestion.includes("overview")) {
+                    response += `📅 As of ${formatDateWithWeek(currentDate)}:\n`;
+                    response += `- Total tasks: ${tasks.length}\n`;
+                    response += `- Active tasks: ${activeTasks.length}\n`;
+                    response += `- Completed tasks: ${completedTasks.length}\n`;
+                    response += `- Planned tasks: ${plannedTasks.length}\n`;
+                } else if (lowerQuestion.includes("active") || lowerQuestion.includes("happening now")) {
+                    response += `🟢 There are ${activeTasks.length} active tasks on ${formatDateWithWeek(currentDate)}.\n\n`;
+                    if (activeTasks.length > 0) {
+                        response += "Here are the details (up to 10):\n";
+                        activeTasks.slice(0, 10).forEach(t => {
+                            response += `• ${t.name} (Type: ${t.activity_type.replace(/_/g, ' ')}, Location: ${t.coordinate})\n`;
+                        });
+                        if (activeTasks.length > 10) {
+                            response += `...and ${activeTasks.length - 10} more.\n`;
+                        }
+                    }
+                } else {
+                    // Keyword search for specific activities or locations
+                    // Simple keyword extraction (filtering common words)
+                    const keywords = lowerQuestion.split(' ').filter(k => k.length > 2 && !['what', 'is', 'the', 'when', 'where', 'are', 'tell', 'me', 'about'].includes(k));
+                    let foundTasks = [];
+                    if (keywords.length > 0) {
+                         foundTasks = tasks.filter(t =>
+                             keywords.some(k => t.name.toLowerCase().includes(k) || t.activity_type.toLowerCase().includes(k) || t.coordinate.includes(k))
+                         );
+                    }
+
+                    if (foundTasks.length > 0) {
+                        response += `Found ${foundTasks.length} tasks matching your query keywords: ${keywords.join(', ')}.\n\n`;
+                        response += "Top 5 results:\n";
+                        foundTasks.slice(0, 5).forEach(t => {
+                            const status = t.start_date <= currentDate && currentDate <= t.end_date ? 'Active' : (currentDate > t.end_date ? 'Completed' : 'Planned');
+                            response += `• ${t.name} (Status: ${status}, Start: ${formatDateWithWeek(t.start_date)}, Location: ${t.coordinate})\n`;
+                        });
+                    } else {
+                       response += "I analyzed the schedule but couldn't find specific information related to your query using local keyword search. Try asking for a 'summary' or 'active tasks'.\n\n(Note: External AI analysis is disabled in local mode.)";
+                    }
+                }
+
+                // Simulate processing delay
+                await new Promise(resolve => setTimeout(resolve, 500));
+                return response;
+            };
+
+            // Handle sending a chat message
+            const handleSendMessage = async () => {
+                if (!chatInput.trim() || isQuerying) return;
+
+                const userMessage = chatInput.trim();
+                setChatInput('');
+
+                setChatMessages(prev => [...prev, { type: 'user', content: userMessage, timestamp: new Date() }]);
+
+                setIsQuerying(true);
+                const response = await querySchedule(userMessage);
+                setChatMessages(prev => [...prev, { type: 'ai', content: response, timestamp: new Date() }]);
+                setIsQuerying(false);
+            };
+
+            // --- Event Handlers and Effects ---
+
+            // Handle file upload
+            const handleFileUpload = async (event) => {
+                const file = event.target.files[0];
+                if (!file) return;
+
+                setIsLoading(true);
+                setError('');
+                setTasks([]); // Clear previous data
+
+                try {
+                    const text = await file.text();
+                    const parsedTasks = parseXML(text);
+
+                    if (parsedTasks.length === 0) {
+                        throw new Error('No valid tasks found matching the required criteria (Activity Codes and Coordinate UDF) in the XML file.');
+                    }
+
+                    setTasks(parsedTasks);
+
+                    // Calculate start and end dates of the project
+                    const startDate = new Date(Math.min(...parsedTasks.map(t => t.start_date)));
+                    const endDate = new Date(Math.max(...parsedTasks.map(t => t.end_date)));
+
+                    // Generate date range (weekly steps)
+                    const range = [];
+                    const current = new Date(startDate);
+                    current.setDate(current.getDate() - 7); // Start slightly before the first task
+
+                    while (current <= endDate) {
+                        range.push(new Date(current));
+                        current.setDate(current.getDate() + 7);
+                    }
+
+                    range.push(new Date(current)); // Ensure the end period is covered
+
+                    setDateRange(range);
+                    setCurrentDate(range[0]);
+                    currentDateIndex.current = 0;
+
+                    // Initial draw (subsequent draws handled by useEffect)
+                    const initialStates = calculateStates(parsedTasks, range[0]);
+                    drawVisualization(initialStates, range[0]);
+
+                    setChatMessages([{
+                        type: 'ai',
+                        content: `✨ Loaded ${parsedTasks.length} tasks from ${formatDateWithWeek(startDate)} to ${formatDateWithWeek(endDate)}.
+
+This application is running locally (Offline Mode). The assistant provides local analysis.
+
+Try asking:
+• "What is the current summary?"
+• "Show me active tasks."
+• "What's happening with the asphalt?"
+`,
+                        timestamp: new Date()
+                    }]);
+
+                } catch (err) {
+                    setError(err.message);
+                } finally {
+                    setIsLoading(false);
+                }
+            };
+
+            // Animation controls (Play/Pause/Step)
+            const playAnimation = useCallback(() => {
+                const animate = () => {
+                    if (currentDateIndex.current < dateRange.length - 1) {
+                        currentDateIndex.current++;
+                        const newDate = dateRange[currentDateIndex.current];
+                        setCurrentDate(newDate);
+
+                        // Redraw visualization for the new date
+                        const states = calculateStates(tasks, newDate);
+                        drawVisualization(states, newDate);
+
+                        animationRef.current = setTimeout(animate, playbackSpeed);
+                    } else {
+                        setIsPlaying(false);
+                        animationRef.current = null;
+                    }
+                };
+
+                animationRef.current = setTimeout(animate, playbackSpeed);
+            }, [dateRange, tasks, playbackSpeed, calculateStates, drawVisualization]);
+
+            const pauseAnimation = useCallback(() => {
+                if (animationRef.current) {
+                    clearTimeout(animationRef.current);
+                    animationRef.current = null;
+                }
+            }, []);
+
+            useEffect(() => {
+                if (isPlaying) {
+                    playAnimation();
+                } else {
+                    pauseAnimation();
+                }
+
+                return () => pauseAnimation();
+            }, [isPlaying, playAnimation, pauseAnimation]);
+
+            const handlePlayPause = () => {
+                setIsPlaying(!isPlaying);
+            };
+
+            const handleStepBackward = () => {
+                if (currentDateIndex.current > 0) {
+                    currentDateIndex.current--;
+                    const newDate = dateRange[currentDateIndex.current];
+                    setCurrentDate(newDate);
+                    const states = calculateStates(tasks, newDate);
+                    drawVisualization(states, newDate);
+                }
+            };
+
+            const handleStepForward = () => {
+                if (currentDateIndex.current < dateRange.length - 1) {
+                    currentDateIndex.current++;
+                    const newDate = dateRange[currentDateIndex.current];
+                    setCurrentDate(newDate);
+                    const states = calculateStates(tasks, newDate);
+                    drawVisualization(states, newDate);
+                }
+            };
+
+            const handleDateSliderChange = (event) => {
+                const index = parseInt(event.target.value);
+                currentDateIndex.current = index;
+                const newDate = dateRange[index];
+                setCurrentDate(newDate);
+                const states = calculateStates(tasks, newDate);
+                drawVisualization(states, newDate);
+            };
+
+            // Canvas interactions (Click and Hover)
+            const handleCanvasInteraction = (event, isClick) => {
+                const canvas = canvasRef.current;
+                if (!canvas) return;
+
+                const rect = canvas.getBoundingClientRect();
+                // Calculate mouse position relative to the canvas and un-scale it
+                const mouseX = (event.clientX - rect.left) / viewSettings.zoom;
+                const mouseY = (event.clientY - rect.top) / viewSettings.zoom;
+
+                const { cellSize, padding } = GRID_CONFIG;
+
+                // Adjust coordinates relative to the grid start (which is drawn at padding, padding + 20)
+                const colIdx = Math.floor((mouseX - padding) / cellSize);
+                const rowIdx = Math.floor((mouseY - (padding + 20)) / cellSize);
+
+                if (colIdx >= 0 && colIdx < GRID_CONFIG.cols.length && rowIdx >= 0 && rowIdx < GRID_CONFIG.rows.length) {
+                    const col = GRID_CONFIG.cols[colIdx];
+                    const row = GRID_CONFIG.rows[rowIdx];
+
+                    if (isClick) {
+                        const key = `${row}-${col}`;
+                        // Recalculate states to ensure data is fresh before displaying modal
+                        const states = calculateStates(tasks, currentDate);
+                        const cellData = states.cellStates[key];
+
+                        setSelectedCell({
+                            col,
+                            row,
+                            data: cellData
+                        });
+                    } else {
+                        // Handle hover
+                        setHoveredCell({ col, row });
+                        canvas.style.cursor = 'pointer';
+                    }
+                } else {
+                    if (!isClick) {
+                       setHoveredCell(null);
+                       canvas.style.cursor = 'default';
+                    }
+                }
+            };
+
+            const handleCanvasMouseMove = (event) => handleCanvasInteraction(event, false);
+            const handleCanvasClick = (event) => handleCanvasInteraction(event, true);
+
+
+            // Redraw when relevant states change (ViewSettings or Hover state)
+            // Note: Changes in Tasks or CurrentDate already trigger redraws via their handlers or the animation loop.
+            useEffect(() => {
+                if (tasks.length > 0 && currentDate) {
+                    const states = calculateStates(tasks, currentDate);
+                    drawVisualization(states, currentDate);
+                }
+            }, [viewSettings, hoveredCell, tasks, currentDate, calculateStates, drawVisualization]);
+
+            // Handle Escape key for modal closure
+            useEffect(() => {
+                const handleEscape = (e) => {
+                    if (e.key === 'Escape' && selectedCell) {
+                        setSelectedCell(null);
+                    }
+                };
+
+                document.addEventListener('keydown', handleEscape);
+                return () => document.removeEventListener('keydown', handleEscape);
+            }, [selectedCell]);
+
+            // Scroll chat to bottom on new message
+            useEffect(() => {
+                chatEndRef.current?.scrollIntoView({ behavior: 'smooth' });
+            }, [chatMessages]);
+
+            // --- UI Rendering ---
+
+            // Initial upload screen
+            if (tasks.length === 0) {
+                return (
+                    <div className="flex h-screen bg-gradient-to-br from-purple-50 to-blue-50">
+                        <div className="flex-1 flex items-center justify-center p-4">
+                            <div className="bg-white rounded-xl shadow-2xl p-8 max-w-2xl w-full transform hover:scale-105 transition-transform duration-200">
+                                <div className="text-center mb-8">
+                                    <div className="inline-flex items-center justify-center w-16 h-16 bg-gradient-to-br from-purple-600 to-blue-600 rounded-full mb-4">
+                                        <Construction className="h-8 w-8 text-white" />
+                                    </div>
+                                    <h1 className="text-4xl font-bold bg-gradient-to-r from-purple-600 to-blue-600 bg-clip-text text-transparent mb-3">
+                                        Construction Progress Visualizer
+                                    </h1>
+                                    <p className="text-lg text-gray-600">Upload Primavera XML to visualize your construction schedule (Local/Offline)</p>
+                                </div>
+
+                                <div className="border-2 border-dashed border-gray-300 rounded-xl p-8 text-center hover:border-purple-400 transition-colors bg-gradient-to-br from-purple-50 to-blue-50">
+                                    <input
+                                        type="file"
+                                        accept=".xml"
+                                        onChange={handleFileUpload}
+                                        ref={fileInputRef}
+                                        className="hidden"
+                                    />
+                                    <Upload className="mx-auto h-14 w-14 text-purple-400 mb-4" />
+                                    <h3 className="text-xl font-semibold text-gray-900 mb-2">Upload Primavera XML</h3>
+                                    <p className="text-sm text-gray-600 mb-6">Select your project schedule file to begin visualization</p>
+                                    <button
+                                        onClick={() => fileInputRef.current?.click()}
+                                        disabled={isLoading}
+                                        className="bg-gradient-to-r from-purple-600 to-blue-600 hover:from-purple-700 hover:to-blue-700 disabled:from-purple-300 disabled:to-blue-300 text-white px-8 py-3 rounded-lg font-medium text-base transition-all shadow-lg hover:shadow-xl transform hover:-translate-y-0.5"
+                                    >
+                                        {isLoading ? 'Processing...' : 'Choose File'}
+                                    </button>
+                                </div>
+
+                                {error && (
+                                    <div className="mt-6 p-4 bg-red-50 border border-red-200 rounded-lg text-sm text-red-700">
+                                        <strong>Error:</strong> {error}
+                                    </div>
+                                )}
+                                 <div className="mt-4 text-xs text-gray-500 text-center">
+                                    Note: This application runs entirely in your browser locally. No data is uploaded to any server.
+                                </div>
+                            </div>
+                        </div>
+                    </div>
+                );
+            }
+
+            // Main visualization interface
+            return (
+                <div className="flex h-screen bg-gray-50">
+                    {/* Left Panel - Visualization and Legend */}
+                    {/* Using overflow-hidden on the main panel containers ensures the canvas container can scroll independently */}
+                    <div className="flex-1 flex flex-col overflow-hidden">
+                        {/* Top - Visualization */}
+                        <div className="flex-1 p-3 pb-2 overflow-hidden">
+                            <div className="bg-white rounded-lg shadow-lg p-3 h-full flex flex-col">
+                                {/* Controls */}
+                                <div className="flex items-center justify-between mb-2">
+                                    <div className="flex items-center gap-2">
+                                        <button
+                                            onClick={handleStepBackward}
+                                            disabled={currentDateIndex.current === 0}
+                                            className="p-1.5 bg-gray-100 hover:bg-gray-200 disabled:bg-gray-50 disabled:text-gray-400 rounded-lg transition-all transform hover:scale-105"
+                                        >
+                                            <SkipBack className="h-4 w-4" />
+                                        </button>
+
+                                        <button
+                                            onClick={handlePlayPause}
+                                            className="p-1.5 bg-gradient-to-r from-purple-600 to-blue-600 hover:from-purple-700 hover:to-blue-700 text-white rounded-lg shadow-md transition-all transform hover:scale-105"
+                                        >
+                                            {isPlaying ? <Pause className="h-4 w-4" /> : <Play className="h-4 w-4" />}
+                                        </button>
+
+                                        <button
+                                            onClick={handleStepForward}
+                                            disabled={currentDateIndex.current === dateRange.length - 1}
+                                            className="p-1.5 bg-gray-100 hover:bg-gray-200 disabled:bg-gray-50 disabled:text-gray-400 rounded-lg transition-all transform hover:scale-105"
+                                        >
+                                            <SkipForward className="h-4 w-4" />
+                                        </button>
+
+                                        <div className="ml-3 flex items-center gap-2 text-sm">
+                                            <Calendar className="h-4 w-4 text-purple-600" />
+                                            <span className="font-semibold text-gray-800">
+                                                {formatDateWithWeek(currentDate)}
+                                            </span>
+                                        </div>
+                                    </div>
+
+                                    {/* View Settings */}
+                                    <div className="flex items-center gap-2">
+                                        <button
+                                            onClick={() => setViewSettings(prev => ({ ...prev, showGrid: !prev.showGrid }))}
+                                            className={`p-1.5 rounded-lg transition-colors ${viewSettings.showGrid ? 'bg-purple-100 text-purple-600' : 'text-gray-400 hover:text-gray-600'}`}
+                                            title="Toggle grid"
+                                        >
+                                            <Layers className="h-4 w-4" />
+                                        </button>
+                                        <button
+                                            onClick={() => setViewSettings(prev => ({ ...prev, showInfrastructure: !prev.showInfrastructure }))}
+                                            className={`p-1.5 rounded-lg transition-colors ${viewSettings.showInfrastructure ? 'bg-purple-100 text-purple-600' : 'text-gray-400 hover:text-gray-600'}`}
+                                            title="Toggle infrastructure"
+                                        >
+                                            <Truck className="h-4 w-4" />
+                                        </button>
+                                        <button
+                                            onClick={() => setViewSettings(prev => ({ ...prev, showLabels: !prev.showLabels }))}
+                                            className={`p-1.5 rounded-lg transition-colors ${viewSettings.showLabels ? 'bg-purple-100 text-purple-600' : 'text-gray-400 hover:text-gray-600'}`}
+                                            title="Toggle labels"
+                                        >
+                                            {viewSettings.showLabels ? <Eye className="h-4 w-4" /> : <EyeOff className="h-4 w-4" />}
+                                        </button>
+                                    </div>
+                                </div>
+
+                                {/* Date Slider with Quarterly Markers */}
+                                <div className="mb-3">
+                                    <input
+                                        type="range"
+                                        min="0"
+                                        max={dateRange.length - 1}
+                                        value={currentDateIndex.current}
+                                        onChange={handleDateSliderChange}
+                                        className="w-full h-2 bg-gray-200 rounded-lg appearance-none cursor-pointer slider"
+                                        style={{
+                                            // Ensure denominator is not zero if dateRange.length is 1
+                                            background: `linear-gradient(to right, #7C3AED 0%, #7C3AED ${(currentDateIndex.current / (dateRange.length - 1 || 1)) * 100}%, #E5E7EB ${(currentDateIndex.current / (dateRange.length - 1 || 1)) * 100}%, #E5E7EB 100%)`
+                                        }}
+                                    />
+
+                                    {/* Quarterly markers calculation */}
+                                    <div className="relative h-3 mt-1">
+                                        {dateRange.length > 0 && (() => {
+                                            const startDate = dateRange[0];
+                                            const endDate = dateRange[dateRange.length - 1];
+                                            const quarters = [];
+
+                                             // Calculate quarters within the range robustly
+                                            let currentQ = new Date(startDate.getFullYear(), Math.floor(startDate.getMonth() / 3) * 3, 1);
+
+                                            while (currentQ <= endDate) {
+                                                const quarter = Math.floor(currentQ.getMonth() / 3) + 1;
+                                                const year = currentQ.getFullYear();
+
+                                                // Find the index in the dateRange closest to the quarter start
+                                                const closestIdx = dateRange.findIndex(date => date >= currentQ);
+
+                                                if (closestIdx !== -1) {
+                                                     const position = (closestIdx / (dateRange.length - 1)) * 100;
+                                                    quarters.push({
+                                                        position,
+                                                        label: `Q${quarter}'${year.toString().slice(-2)}`,
+                                                        week: getWeekNumber(dateRange[closestIdx])
+                                                    });
+                                                }
+                                                 // Move to the next quarter
+                                                currentQ.setMonth(currentQ.getMonth() + 3);
+                                            }
+
+                                            return quarters.map((q, idx) => (
+                                                <div key={idx}>
+                                                    <div
+                                                        className="absolute w-px h-2 bg-gray-400"
+                                                        style={{ left: `${q.position}%` }}
+                                                    />
+                                                    <div
+                                                        className="absolute text-xs text-gray-600 font-medium"
+                                                        style={{
+                                                            left: `${q.position}%`,
+                                                            top: '8px',
+                                                            transform: 'translateX(-50%)'
+                                                        }}
+                                                    >
+                                                        {q.label}
+                                                        <span className="text-gray-400 ml-1">W{q.week}</span>
+                                                    </div>
+                                                </div>
+                                            ));
+                                        })()}
+                                    </div>
+
+                                    <div className="flex justify-between text-xs text-gray-600 mt-6 font-medium">
+                                        <span>{formatDateWithWeek(dateRange[0] || new Date())}</span>
+                                        <span>{formatDateWithWeek(dateRange[dateRange.length - 1] || new Date())}</span>
+                                    </div>
+                                </div>
+
+                                {/* Canvas Container (Scrollable) */}
+                                <div className="flex-1 bg-gradient-to-br from-gray-50 to-gray-100 rounded-lg p-2 overflow-auto border border-gray-200">
+                                    <canvas
+                                        ref={canvasRef}
+                                        onClick={handleCanvasClick}
+                                        onMouseMove={handleCanvasMouseMove}
+                                        className="bg-white rounded shadow-inner"
+                                    />
+                                </div>
+                            </div>
+                        </div>
+
+                        {/* Bottom - Legend */}
+                        <div className="p-3 pt-2" style={{ height: '25vh', flexShrink: 0 }}>
+                            <div className="bg-white rounded-lg shadow-lg p-3 h-full overflow-y-auto">
+                                <h3 className="text-base font-bold text-gray-900 mb-2 flex items-center gap-2">
+                                    <Info className="h-4 w-4 text-purple-600" />
+                                    Legend
+                                </h3>
+
+                                {/* Row Reference */}
+                                <div className="mb-2">
+                                    <h4 className="text-xs font-semibold text-gray-700 mb-1">Row Reference</h4>
+                                    <div className="bg-gradient-to-r from-purple-50 to-blue-50 rounded border border-purple-200 p-1.5">
+                                        <table className="w-full text-xs">
+                                            <tbody>
+                                                <tr>
+                                                    <td className="pr-3">1 = HTZ_waterside</td>
+                                                    <td className="pr-3">3 = AGV_waterside</td>
+                                                    <td className="pr-3">5 = WSTP</td>
+                                                    <td className="pr-3">7 = B</td>
+                                                    <td>9 = D</td>
+                                                </tr>
+                                                <tr>
+                                                    <td className="pr-3">2 = HTZ_landside</td>
+                                                    <td className="pr-3">4 = AGV_landside</td>
+                                                    <td className="pr-3">6 = A</td>
+                                                    <td className="pr-3">8 = C</td>
+                                                    <td>10 = LSTP</td>
+                                                </tr>
+                                            </tbody>
+                                        </table>
+                                    </div>
+                                </div>
+
+                                {/* Construction States */}
+                                <div className="mb-2">
+                                    <h4 className="text-xs font-semibold text-gray-700 mb-1">Construction States</h4>
+                                    <div className="flex flex-wrap gap-1.5 text-xs">
+                                        {Object.entries(FILL_STATES).map(([key, value]) => {
+                                            if (key === 'NONE') return null;
+                                            return (
+                                                <div key={key} className="flex items-center gap-1">
+                                                    <div
+                                                        className="w-3 h-3 rounded border border-gray-400"
+                                                        style={{
+                                                            backgroundColor: value.color,
+                                                            opacity: value.opacity || 1
+                                                        }}
+                                                    />
+                                                    <span className="text-gray-700">
+                                                        {value.name} {value.temporary ? '(temp)' : ''} {value.pulse ? '✨' : ''}
+                                                    </span>
+                                                </div>
+                                            );
+                                        })}
+                                        <div className="flex items-center gap-1">
+                                            <div className="w-3 h-3 rounded-full bg-red-600 border border-gray-400"></div>
+                                            <span className="text-gray-700">LSTP Objects 🔴</span>
+                                        </div>
+                                    </div>
+                                </div>
+
+                                {/* Infrastructure Lines & Overlays */}
+                                <div>
+                                    <h4 className="text-xs font-semibold text-gray-700 mb-1">Infrastructure Lines & Overlays</h4>
+                                    <div className="flex flex-wrap gap-1.5 text-xs">
+                                        {Object.entries(INFRASTRUCTURE_STYLES).map(([key, value]) => {
+                                            if (key === 'formwork') {
+                                                return (
+                                                    <div key={key} className="flex items-center gap-1">
+                                                        <div className="w-4 h-4 border-[3px] border-red-500 border-dashed rounded"></div>
+                                                        <span className="text-gray-700">
+                                                            {value.name} (temp outline) 🔨
+                                                        </span>
+                                                    </div>
+                                                );
+                                            }
+                                            return (
+                                                <div key={key} className="flex items-center gap-1">
+                                                    <div
+                                                        className="w-6 h-1"
+                                                        style={{
+                                                            backgroundColor: value.color,
+                                                            height: '8px',
+                                                            opacity: value.temporary ? 0.8 : 1
+                                                        }}
+                                                    />
+                                                    <span className="text-gray-700">
+                                                        {value.name} {value.temporary ? '(temp)' : '(perm)'}
+                                                        {key === 'service_road_infra' && ' 🚚'}
+                                                        {key === 'sqc_rail' && ' + working area overlay'}
+                                                        {key === 'armg_rail' && ' + working area overlay'}
+                                                    </span>
+                                                </div>
+                                            );
+                                        })}
+                                        <div className="flex items-center gap-1">
+                                            <div
+                                                className="w-3 h-3 rounded border border-gray-400"
+                                                style={{
+                                                    backgroundColor: '#90EE90',
+                                                    opacity: 0.5
+                                                }}
+                                            />
+                                            <span className="text-gray-700">
+                                                Crane Assembly (working area overlay) 🏗️
+                                            </span>
+                                        </div>
+                                    </div>
+                                </div>
+                            </div>
+                        </div>
+                    </div>
+
+                    {/* Right Panel - Chat */}
+                    <div className="w-[380px] bg-white shadow-lg border-l border-gray-200 flex flex-col flex-shrink-0">
+                        <div className="p-3 border-b border-gray-200 bg-gradient-to-r from-purple-600 to-blue-600 text-white">
+                            <div className="flex items-center gap-2">
+                                <Bot className="h-4 w-4" />
+                                <h3 className="font-medium text-base">Schedule Assistant (Local)</h3>
+                            </div>
+                            <div className="text-xs mt-1 opacity-90">
+                                Offline analysis of the schedule data.
+                            </div>
+                        </div>
+
+                        <div className="flex-1 overflow-y-auto p-3 space-y-3 bg-gradient-to-b from-gray-50 to-white">
+                            {chatMessages.map((message, index) => (
+                                <div key={index} className={`flex gap-2 ${message.type === 'user' ? 'justify-end' : 'justify-start'} slide-in`}>
+                                    {message.type === 'ai' && (
+                                        <div className="flex-shrink-0">
+                                            <div className="w-7 h-7 bg-gradient-to-br from-purple-600 to-blue-600 rounded-full flex items-center justify-center shadow-md">
+                                                <Bot className="h-3.5 w-3.5 text-white" />
+                                            </div>
+                                        </div>
+                                    )}
+
+                                    <div className={`max-w-[80%] px-3 py-2 rounded-lg text-sm ${
+                                        message.type === 'user'
+                                            ? 'bg-gradient-to-r from-purple-600 to-blue-600 text-white shadow-md'
+                                            : 'bg-white border border-gray-200 text-gray-900 shadow-sm'
+                                    }`}>
+                                        <div className="whitespace-pre-wrap font-sans">{message.content}</div>
+                                    </div>
+
+                                    {message.type === 'user' && (
+                                        <div className="flex-shrink-0">
+                                            <div className="w-7 h-7 bg-gradient-to-br from-gray-600 to-gray-800 rounded-full flex items-center justify-center shadow-md">
+                                                <User className="h-3.5 w-3.5 text-white" />
+                                            </div>
+                                        </div>
+                                    )}
+                                </div>
+                            ))}
+
+                            {isQuerying && (
+                                <div className="flex gap-2 justify-start slide-in">
+                                    <div className="flex-shrink-0">
+                                        <div className="w-7 h-7 bg-gradient-to-br from-purple-600 to-blue-600 rounded-full flex items-center justify-center shadow-md">
+                                            <Bot className="h-3.5 w-3.5 text-white" />
+                                        </div>
+                                    </div>
+                                    <div className="bg-white border border-gray-200 px-3 py-2 rounded-lg shadow-sm">
+                                        <div className="flex space-x-1">
+                                            <div className="w-1.5 h-1.5 bg-purple-600 rounded-full animate-bounce"></div>
+                                            <div className="w-1.isualizer />);
+
+    </script>
+</body>
+</html>
